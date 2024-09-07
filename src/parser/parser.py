@@ -45,21 +45,22 @@ async def get_info_about_product(html: BS):
         return None
 
     return {
-        'name': name.strip().replace('\xa0', ' '),
-        'description': description.strip().replace('\xa0', ' '),
-        'calories': calories.strip(),
-        'fats': fats.strip(),
-        'carbs': carbs.strip(),
-        'proteins': proteins.strip(),
-        'unsaturated_fats': unsaturated_fats.strip(),
-        'sugar': sugar.strip(),
-        'salt': salt.strip(),
-        'portion': portion.strip(),
+        name.strip().replace('\xa0', ' '): {
+            'description': description.strip().replace('\xa0', ' '),
+            'calories': calories.strip(),
+            'fats': fats.strip(),
+            'carbs': carbs.strip(),
+            'proteins': proteins.strip(),
+            'unsaturated_fats': unsaturated_fats.strip(),
+            'sugar': sugar.strip(),
+            'salt': salt.strip(),
+            'portion': portion.strip(),
+        }
     }
 
 
 async def main():
-    data = []
+    data = {}
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -78,7 +79,8 @@ async def main():
                 html = BS(response, 'html.parser')
 
             logging.info(f"{link}: Extracting product information")
-            data.append(await get_info_about_product(html=html))
+            product_info = await get_info_about_product(html=html)
+            data.update(product_info)
 
         await browser.close()
 
