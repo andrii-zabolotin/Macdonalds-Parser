@@ -1,8 +1,9 @@
 import asyncio
 import json
 import logging
+import aiohttp
+
 from bs4 import BeautifulSoup as BS
-from playwright.async_api import async_playwright, Page
 
 
 logging.basicConfig(filename='parser.log', level=logging.INFO,
@@ -11,78 +12,62 @@ logging.basicConfig(filename='parser.log', level=logging.INFO,
 url = 'https://www.mcdonalds.com/ua/uk-ua/eat/fullmenu.html'
 
 
-async def fetch_product_links(page: Page):
-    logging.info("Parsing product links.")
-    await page.goto(url=url)
-    await page.wait_for_load_state()
+async def fetch_product_links(session: aiohttp.ClientSession):
+    async with session.get(url=url) as response:
+        response.raise_for_status()
+        html = BS(await response.text(), 'html.parser')
 
-    response = await page.content()
-    html = BS(response, 'html.parser')
-
-    product_links = html.find_all('a', class_='cmp-category__item-link')
-    links = ['https://www.mcdonalds.com' + link.get('href') + '#accordion-29309a7a60-item-9ea8a10642' for link in product_links]
+    product_links = html.select('.cmp-category__item')
+    links = ['https://www.mcdonalds.com/dnaapp/itemDetails?country=UA&language=uk&showLiveData=true&item=' + link.get('data-product-id') for link in product_links]
 
     logging.info(f"Found {len(links)} product links.")
     return links
 
 
-async def get_info_about_product(html: BS):
-    try:
-        name = html.select('.cmp-product-details-main__heading-title')[0].text
-        description = html.select('.cmp-product-details-main__description')[0].text
-        nutrition = html.select('.cmp-nutrition-summary__heading-primary-item')
-        calories = nutrition[0].select('.value span')[2].text
-        fats = nutrition[1].select('.value span')[2].text
-        carbs = nutrition[2].select('.value span')[2].text
-        proteins = nutrition[3].select('.value span')[2].text
-        additional_nutrition = html.select('.cmp-nutrition-summary__details-column-view-mobile .label-item')
-        unsaturated_fats = additional_nutrition[0].select('.value span')[0].text.split('/')[0]
-        sugar = additional_nutrition[1].select('.value span')[0].text.split('/')[0]
-        salt = additional_nutrition[2].select('.value span')[0].text.split('/')[0]
-        portion = additional_nutrition[3].select('.value span')[0].text.split('/')[0]
-    except Exception as e:
-        logging.error(f"Error extracting data: {e}")
-        return None
+async def get_info_about_product(link: str, session: aiohttp.ClientSession):
+    async with session.get(url=link) as response:
+        response.raise_for_status()
+        result = await response.json()
+
+    name = result['item']['item_name']
+    if result['item']['description'] != {}:
+        description = result['item']['description']
+    else:
+        description = ''
+    calories = result['item']['nutrient_facts']['nutrient'][2]['value'] + ' ' + result['item']['nutrient_facts']['nutrient'][2]['uom_description']
+    fats = result['item']['nutrient_facts']['nutrient'][3]['value'] + ' ' + result['item']['nutrient_facts']['nutrient'][3]['uom_description']
+    carbs = result['item']['nutrient_facts']['nutrient'][4]['value'] + ' ' + result['item']['nutrient_facts']['nutrient'][4]['uom_description']
+    proteins = result['item']['nutrient_facts']['nutrient'][5]['value'] + ' ' + result['item']['nutrient_facts']['nutrient'][5]['uom_description']
+    unsaturated_fats = result['item']['nutrient_facts']['nutrient'][8]['value'] + ' ' + result['item']['nutrient_facts']['nutrient'][8]['uom_description']
+    sugar = result['item']['nutrient_facts']['nutrient'][7]['value'] + ' ' + result['item']['nutrient_facts']['nutrient'][7]['uom_description']
+    salt = result['item']['nutrient_facts']['nutrient'][6]['value'] + ' ' + result['item']['nutrient_facts']['nutrient'][6]['uom_description']
+    portion = result['item']['nutrient_facts']['nutrient'][0]['value'] + ' ' + result['item']['nutrient_facts']['nutrient'][0]['uom_description']
 
     return {
-        name.strip().replace('\xa0', ' '): {
-            'description': description.strip().replace('\xa0', ' '),
-            'calories': calories.strip(),
-            'fats': fats.strip(),
-            'carbs': carbs.strip(),
-            'proteins': proteins.strip(),
-            'unsaturated_fats': unsaturated_fats.strip(),
-            'sugar': sugar.strip(),
-            'salt': salt.strip(),
-            'portion': portion.strip(),
+            name: {
+                'description': description,
+                'calories': calories,
+                'fats': fats,
+                'carbs': carbs,
+                'proteins': proteins,
+                'unsaturated_fats': unsaturated_fats,
+                'sugar': sugar,
+                'salt': salt,
+                'portion': portion,
+            }
         }
-    }
 
 
 async def main():
+    async with aiohttp.ClientSession() as session:
+        links = await fetch_product_links(session=session)
+
+        tasks = [get_info_about_product(link=link, session=session) for link in links]
+        results = await asyncio.gather(*tasks)
+
     data = {}
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        links = await fetch_product_links(page=page)
-
-        for link in links:
-            await page.goto(link)
-            await page.wait_for_selector('.cmp-nutrition-summary__heading-primary-item', timeout=5000)
-            response = await page.content()
-            html = BS(response, 'html.parser')
-
-            while html.select('.cmp-nutrition-summary__heading-primary-item')[0].select('.value span')[2].text == '0':
-                logging.warning(f"{link}: data isn't loaded, reloading.")
-                response = await page.content()
-                html = BS(response, 'html.parser')
-
-            logging.info(f"{link}: Extracting product information")
-            product_info = await get_info_about_product(html=html)
-            data.update(product_info)
-
-        await browser.close()
+    for result in results:
+        data.update(result)
 
     logging.info(f"Writing data for {len(data)} products to data.json.")
     with open('data.json', 'w', encoding='utf-8') as f:
